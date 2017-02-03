@@ -6,8 +6,6 @@ I found [this Twitter thread](https://twitter.com/dalejbarr/status/8267178896087
 
 To that end, I thought I'd walk through a basic overview of how to accomplish some of the operations you might commonly encounter when you first get a data set. If you're generating the data yourself, you can try to make your life easier by saving it in the format you want.
 
-This blog post is actually an R Notebook! I've put the .rmd file on GitHub so that you can download it and fiddle with it as much as you like.
-
 Where possible, I'll show multiple ways to accomplish something and try to highlight packages that will make things easier. 
 
 MANDATORY DISCLAIMER: There are often at least six ways to do anything in R. If you don't like any of the methods here, rest assured that there are others (and probably better ones, too); you can almost certainly find something that suits your style.
