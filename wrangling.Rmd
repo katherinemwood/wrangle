@@ -1,0 +1,395 @@
+---
+title: "An Introduction to Data Wrangling"
+output: html_notebook
+---
+I found [this Twitter thread](https://twitter.com/dalejbarr/status/826717889608765444) on the vagaries of data wrangling killing momentum interesting, particularly the notion of how frustrating it must be to be at point A with your data, see Point B, where you'd like to go, and have no idea how to get there. Even for those with programming experience, data wrangling can be an enormous chore.
+
+To that end, I thought I'd walk through a basic overview of how to accomplish some of the operations you might commonly encounter when you first get a data set. If you're generating the data yourself, you can try to make your life easier by saving it in the format you want.
+
+This blog post is actually an R Notebook! I've put the .rmd file on GitHub so that you can download it and fiddle with it as much as you like.
+
+Where possible, I'll show multiple ways to accomplish something and try to highlight packages that will make things easier. 
+
+MANDATORY DISCLAIMER: There are often at least six ways to do anything in R. If you don't like any of the methods here, rest assured that there are others (and probably better ones, too); you can almost certainly find something that suits your style.
+
+#Reading in data#
+###CSV Files###
+First, I'm going to create some data to actually read in. The following code chunk will write three csv files to the current directory, each with 3 columns of random data. This is meant to simulate raw data from three different subjects.
+
+```{r}
+#Generate some dummy data
+data <- replicate(3, mapply(rnorm, c(100, 100, 100),  c(10, 100, 1), c(2, 25, .5)), 
+                  simplify = FALSE)
+catch_output <- mapply(write.csv, data,
+       mapply(paste, rep("data", times=length(data)),
+              seq(1, length(data)),
+              rep(".csv"), sep=""), row.names=FALSE)
+```
+Here's a common situation: one spreadsheet has all of a subject's raw data, and you have a few dozen spreadsheets. First, let's talk about an easy way to read that in as painlessly as possible. No for-loops needed here; we'll just use the trusty `apply()` family from base R.
+```{r}
+#Note that if your data are not in your current directory, you need to either:
+#Call, for ex., setwd('~/my_data_folder') to set the data folder as the current directory
+#Specify the path in list.files and then have it return the full path name of each file, rather than #the relative path.
+alldata <- lapply(list.files(pattern = '*.csv'), read.csv)
+```
+We're accomplishing a few things in one line. First, the call to `list.files` simply lists all of the files in your current directory. It has a bunch of optional arguments, too. You can specify a pattern, which is just a regex expression that specifies what you want. Here, I only want .csv files, so I specify that I want any file ("*" is a wildcard symbol allowing anything) that ends in the extension .csv. I can specify other arguments, like whether I want the full path names returned, whether I want it to also search sub-directories for files, and so on.
+
+After we have this list of files, we simply iterate over it and call `read.csv` on each one. The end result is a list, wherein each element is one subject's data frame.
+
+Now, a list of data frames is not the *most* useful data format to have. Fortunately, it's easy to bind this list together into one big data frame. Here's how to bring it all together in base R.
+```{r}
+subjects_all <- do.call('rbind', alldata)
+head(subjects_all)
+```
+Note that the information about which data belong to each subject is lost here. You'll need to add an identifier column, or make sure that each file has one, before reading it in this way.
+
+How about some good old dplyr?
+```{r}
+library(dplyr)
+subjects_all <- bind_rows(alldata, .id='subject')
+head(subjects_all)
+unique(subjects_all$subject)
+```
+We can use the`.id` argument to specify an ID column, which will keep track of where the data comes from.
+
+We can also use the handy rbindlist function from the [data.table](https://cran.r-project.org/web/packages/data.table/data.table.pdf)/[dtplyr](https://cran.r-project.org/web/packages/dtplyr/dtplyr.pdf) package. This will label the data automatically for us according to which data frame it came from; we can call this new column (specified by the id argument) anything we like.
+```{r}
+library(data.table)
+subjects_all <- rbindlist(alldata, idcol='subject')
+head(subjects_all)
+unique(subjects_all$subject)
+```
+Note also that `rbindlist()` is an order of magnitude faster than `do.call`. If you've got a lot of data, you'll probably want to go with this function. `data.tables` are extremely fast and memory efficient in general, and might be a good option if you're working with truly huge amounts of data. For most uses, though, this kind of optimization isn't really necessary.
+
+###Text files###
+Same process. I'll make some real quick:
+```{r}
+catch_output <- mapply(write.table, data,
+       mapply(paste, rep("data", times=length(data)),
+              seq(1, length(data)),
+              rep(".txt"), sep=""), row.names=FALSE)
+```
+
+To read it in, we just call `read.table` instead.
+```{r}
+allsubjs <- lapply(list.files(pattern = '*.txt'), read.table, header=TRUE, colClasses=c('double'))
+head(allsubjs[[1]])
+```
+Just like before, we end up with a list of data frames, one for each subject. In `read.table()`, unlike `read.csv`, the `header` argument defaults to `FALSE`, so be sure to change that. I also specify `colClasses` here to tell R what type of data the content of the columns is. Without that, these doubles get read in as factors; doing it now saves a little work later.
+
+We can then bind these together with `rbindlist` just like we did when we used `read.csv`.
+
+###XLS(X)###
+Need to read in Excel files, or read in each sheet in one file as a separate set of data?
+
+[Wickham's got your back.](https://cran.r-project.org/web/packages/readxl/readxl.pdf)
+
+###Some general notes###
+
+There are a lot of arguments you can specify in the `read.csv` function call that can save you work down the line--I used some of them when I was reading in the text files, but there are many more. You can even tell the function what strings should be read as NA values! This is really handy if you have NULL and what R to treat that as NA. You can also read in only part of the file, which is useful if you have a monster file and want to read it in in chunks.
+
+#Reshaping Data#
+
+It's helpful to be able to switch at will between data in wide format, where each row is a subject and each column contains a variable, to long format, where each row is a value at a given time, or measure (for repeated measures).
+
+Here's a very simple data set. Each row is a subject's scores. Column 1 is their subject number, followed by their scores in the control, treatment 1, and treatment 2 conditions. We tend to be most accustomed to seeing data this way. This is "wide" format.
+```{r}
+traits <- data.frame('id'=seq(1, 10),
+                     'control'=floor(rnorm(10, 30, 5)),
+                     'treat1'=floor(rnorm(10, 10, 2)),
+                     'treat2'=floor(rnorm(10, 15, 3)))
+print(traits)
+```
+###Wide to Long###
+
+Now, when we cast this to "long" format, we will have the id column (the subject number), a variable column (in this case, which test was taken), and the value column (the score on each test). Here it is, melted two ways. In base:
+```{r}
+traits_long_base <- reshape(traits, idvar="id", direction='long', v.names=c('score'),
+                       timevar='test',times=c('control', 'treat1', 'treat2'), varying=seq(2, 4))
+print(traits_long_base)
+```
+We have to be pretty careful about specifying our arguments here. The `idvar` indicates which column we want to map over the data. Here, we want the subject number; we want each subject's score on each test labeled with their unique ID. Direction is fairly self-explanatory; we're going to long form here. `v.names` is the name (or names) of the new columns. Here, we're collapsing everybody's scores into a single column, so we call it `'score' `. `timevar` is the variable that changes over time, or over repeated measures. Here it's which test they took, so we call the new column `'test'`. Then we tell it which values to use in this new times column with `times`; we want the name of the test. Then we tell it which columns of our data are varying over time/are our repeated measures; here it's the final three columns (you can also specify a vector of strings).
+
+Here are the same results with the `melt()` function from data.table or reshape2. We specify again which column represents our data labels, and then we tell it which columns we want it to treat as our "measures," which in our case is our three tests (if unspecified, it just uses all non-id variables, so we could have left it out here):
+```{r}
+traits_long_m <- melt(traits, id.vars="id", measure.vars=c('control', 'treat1', 'treat2'), 
+                    variable.name='test', value.name='score')
+print(traits_long_m)
+```
+And let's not leave out `tidyr`:
+```{r}
+library(tidyr)
+traits_long_t <- gather(traits, key=test, value=score, control, treat1, treat2)
+print(traits_long_t)
+```
+Here, the key/value pairing tells us about our outcome columns, and then we just list the columns to gather up. 
+
+Three roads, same destination. I find `melt` and `gather` both much more intuitive than `reshape`, with `gather` the easiest of them all to use, but your mileage may vary.
+
+Data is *really* easy to plot this way:
+```{r}
+library(ggplot2)
+plot <- ggplot(traits_long_t, aes(x=test, y=score, color=test)) +
+        geom_point()
+print(plot)
+```
+Simplicity itself.
+
+###Long to Wide##
+
+Now, if we want to go the other direction (long to wide), in base R, we call the same function with different arguments:
+```{r}
+traits_wide_base <- reshape(traits_long_base, direction='wide', timevar='test', idvar='id')
+print(traits_wide_base)
+```
+Now we have the original structure of our data back.
+
+The inverse of `melt()` is `dcast`:
+```{r}
+traits_wide_m <- dcast(traits_long_m, id ~ test, value.var='score')
+print(traits_wide_m)
+```
+Right back to where we were.
+
+And to undo `gather`, we `spread`:
+```{r}
+traits_wide_t <- spread(traits_long_t, test, score)
+print(traits_wide_t)
+```
+###Reshaping with more variables###
+
+Here's a more complex example.
+```{r}
+traittest <- data.frame('traitA'=factor(rep(c('high', 'med', 'low'), each=4)),
+                        'traitB'=factor(rep(c('positive', 'negative'), times=6)),
+                        'test1'=floor(rnorm(12, 10, 2)), 'test2'=floor(rnorm(12, 15, 2)))
+head(traittest)
+```
+
+There are a lot of ways to melt this data. Maybe we want to
+collpase the tests into a single column--in this case the traits
+are the identifier variables.
+
+In base:
+```{r}
+tt_bytrait_base <- reshape(traittest, direction='long', v.names='score',
+                           timevar='test', times=c('test1', 'test2'), varying=c('test1','test2'))
+print(tt_bytrait_base)
+```
+
+
+With `melt()`:
+```{r}
+tt_bytrait_m <- melt(traittest, measure.vars=c('test1', 'test2'), variable.name='test',
+                  value.name='score')
+head(tt_bytrait_m)
+```
+With `gather`:
+```{r}
+tt_bytrait_t <- gather(traittest, test, score, test1, test2)
+head(tt_bytrait_t)
+```
+
+
+Or, we can let the tests be the identifiers, and collapse the
+traits into a single column.
+
+Base:
+```{r}
+tt_bytest_base <- reshape(traittest, direction='long', v.names='rating',
+                          timevar='trait', times=c('traitA', 'traitB'), 
+                          varying=c('traitA','traitB'))
+print(tt_bytest_base)
+```
+
+`melt`:
+```{r}
+tt_bytest_m <- melt(traittest, measure.vars=c('traitA', 'traitB'),
+                  variable.name='trait', value.name='rating')
+head(tt_bytest_m)
+```
+(We can ignore the warning; it's warning us about the fact that we're combining two factors that don't share levels, so it's coercing them all to characters.)
+
+With `gather`:
+```{r}
+tt_bytest_t <- gather(traittest, trait, rating, traitA, traitB)
+head(tt_bytest_t)
+```
+(Same warning as above.)
+
+#Reformatting Data#
+So we've read data in, and can flip it between long and wide at will. Great, but what if the data itself needs to be fixed? 
+
+###Recoding values###
+Let's say you have some data that look like this:
+```{r}
+yesno <- data.frame('subj'=seq(1,10), 'resp'=rep(c('Y','N'), each=5))
+print(yesno)
+```
+So we have 10 subjects, and each one responded either yes (Y) or no (N) to... something. But maybe we don't like the way this is coded; Y and N are hard to work with if we want to find average accuracy, for example. Maybe we want 1's and 0's instead, with which it is easy to do calculations.
+
+If we want to recode these values, we have a few options. We can use indexing, of course, but there are also some functions that will save you some work.
+
+Base has the `ifelse` function, which performs a logical comparison, and if true, returns the first value; else, the second:
+```{r}
+yesno$resp <- ifelse(yesno$resp == 'Y', 1, 0)
+print(yesno)
+```
+If we have more than two alternatives, you'll have to use something like a `switch` statement:
+```{r}
+yesnomaybe <- data.frame('subj'=seq(1,15), 'resp'=rep(c('Y','N','M'), each=5))
+print(yesnomaybe)
+```
+Now we have three options. Maybe we want 'yes' to be 1, 'no' to be -1, and 'maybe' to be 0. Here's how you can do it with a `switch` statement and `sapply` to call it on each element:
+```{r}
+yesnomaybe$resp <- sapply(yesnomaybe$resp, function(x) switch(as.character(x), 'Y'=1, 'N'=-1,
+                                                              'M'=0))
+print(yesnomaybe)
+```
+In `dplyr`, we have the `recode` function:
+```{r}
+yesnomaybe$dplyr_recode <- recode(yesnomaybe$resp, `1`='yes', `-1`='no', `0`='maybe')
+print(yesnomaybe)
+```
+Recoding, assuming you don't have to do it for a huge number of possibilities, goes pretty fast.
+
+###Adding variables###
+Variables can be added to an existing data frame just with the `$` operator:
+```{r}
+df <- data.frame('x'=rnorm(20, 6), 'y'=rnorm(20))
+print(df)
+df$z <- rnorm(20, 10)
+print(df)
+```
+If you need to manipulate two data vectors that are numeric, you can just add, multiply, etc. your columns together to perform these operations elementwise:
+```{r}
+df$total <- with(df, x + y + z)
+head(df)
+```
+You also have a lot of options in the `dplyr` library, notably `transform`:
+```{r}
+df <- transform(df, x = -x)
+head(df)
+```
+But now that we've updated a column, our total is wrong. Let's fix it with `transmute`:
+```{r}
+df <- mutate(df, corrected_total = x + y + z)
+head(df)
+```
+Maybe I now want a dataframe just of the even numbers in the x column, and the residuals from total and corrected total (for... reasons). `transmute` is like mutate, but it throws away all the extra:
+```{r}
+df_even <- transmute(df, x_ev=floor(x)%%2==0, residuals=total-corrected_total)
+head(df_even)
+```
+If none of these methods fit the bill, you can call `apply` along all the columns or rows of your data frame and write a custom function to do whatever processing you need.
+
+###Factor levels as column labels###
+Let's take the unfortunate case of levels-as-columns, in which all the levels of a factor are columns, and people get a 1 or a 0 for each level instead of their value. Here's some example data:
+```{r}
+levs <- data.frame('subj'=seq(1, 4), 'a'=c(0, 0, 1, 0), 'b'=c(1, 0, 0, 1), 'c'=c(0, 1, 0, 0))
+print(levs)
+```
+So, what we have are three subjects, and a factor with three possible levels: A, B, and C. What we want is the subject and the actual level of their factor, so we need a 2-column matrix.
+
+Here's one way we might do that (there are others) that uses some procedures I've already shown. First, we'll reshape the dataframe so that the factors end up in one column. This has the advantage of putting the actual values of the factors we want all in one place. Then we filter out the 0s, leaving behind only the levels the subject actually selected, drop the redundant ones colum, then put the subjects back in the right order.
+
+For these examples, I'll print out each intermediate stage of manipulation so that you can see what's happening.
+
+All about that base:
+```{r}
+(lev_long <- reshape(levs, idvar='subj', direction='long', v.names='value', timevar='trait',
+                    times=c('a', 'b', 'c'), varying=c('a', 'b', 'c')))
+```
+First, we reshape the data. We need all of the factor-related pieces of information in a single column. We have a column with the possible factor levels, and a column indicating 0 (not the subject's level) or 1 (the subject's level).
+
+```{r}
+(lev_filtered <- with(lev_long, lev_long[value == 1, 1:2]))
+```
+
+The second step just uses good old-fashioned indexing to keep all rows where the value is 1 (aka, the subject has that level), and to keep only the useful subject and trait columns; what the `with` function does is tell R to perform all operations with the supplied data set, so we can reference columns by isolated names rather than having to do the verbose `data_frame$column` syntax. 
+
+```{r}
+(lev_reformed_base <- lev_filtered[order(lev_filtered$subj),])
+```
+The final step is reordering the data according to the subject column in ascending order. Now we've got our data in a much more sensible format.
+
+Tidyr and dplyr make quick work of this. First, we gather:
+```{r}
+(lev_g <- gather(levs, trait, value, a, b, c))
+```
+Filter out the 0s:
+```{r}
+(lev_f <- filter(lev_g, value != 0))
+```
+Retain only the useful columns:
+```{r}
+(lev_s <- select(lev_f, subj, trait))
+```
+Finally, put the subjects back in order:
+```{r}
+(lev_reform <- arrange(lev_s, subj))
+```
+Here are those steps strung together with piping and thus obviating the need for all those separate variable assignments:
+```{r}
+levs_reformed <- gather(levs, trait, value, a, b, c) %>%
+                filter(value != 0) %>%
+                select(subj, trait) %>%
+                arrange(subj)
+print(levs_reformed)
+```
+Charming!
+
+What about if we have multiple factors? Here we have a test and a report, each of which has three possible levels: ABC and XYZ, respectively.
+
+```{r}
+mfac <- data.frame('subj'=seq(1, 4), 'test.A'=c(0, 1, 0, 1), 'test.B'=c(1, 0, 0, 0), 
+                   'test.C'=c(0, 0, 1, 0), 'report.X'=c(1, 0, 0, 0), 
+                   'report.Y'=c(0, 1, 1, 0), 'report.Z'=c(0, 0, 0, 1))
+print(mfac)
+```
+So what we want is a dataframe with three columns: subject number, test, and report. Subject 1 picked test A and report X, subject 2 picked test A and report Y, and so on.
+
+This gets a little more complicated. If we collapse everything into one column, we're going to have to then spread it back out to separate the factors. We've also got the item label merged to its type, which is a problem if we only want the letter designation.
+
+Let's try with base. Here's the reshape-filter method:
+```{r}
+mfac_long <- reshape(mfac, idvar='subj', direction='long', v.names='value', timevar='measure',
+                    times=colnames(mfac)[-1], varying=colnames(mfac)[-1])
+mfac_filtered <- with(mfac_long, mfac_long[value == 1, 1:2])
+type_splits <- do.call(rbind, strsplit(mfac_filtered$measure, '.', fixed=TRUE))
+mfac_sep <- data.frame('subj'=mfac_filtered$subj, 
+                       'type'=type_splits[,1], 
+                       'version'=type_splits[,2])
+mfac_wide <- reshape(mfac_sep, idvar='subj', direction='wide', timevar='type')
+(mfac_reformed_base <- mfac_wide[order(mfac_wide$subj),])
+```
+Pulling this off takes more finagling. Things are fine when we reshape and filter (note the trick used to save some verbage in reshape(); indexing with a negative excludes that item, so we're saying we want all column names except the first), but then we have to recover whether our factor was a test or a report *separately* of its type. This means we have to split the string using `strsplit`, bind the results into a matrix (because they automatically come out as a list), and then take those newly-made factors and reshape it wide again with the test type and report type as their own columns. One nice thing about this approach, in spite of its many steps, is that it's totally blind to the content of the labels (provided they are consistently delimited). If they're labeled in a cooperative way, you don't need to know how many labels there are or what they say, and they can be in any order.
+
+Here's another base approach, from my BFF Kelly Chang. This one uses the `apply` function to sweep a filter down the dataframe, then repackage the results:
+```{r}
+labels <- c('A', 'B', 'C', 'X', 'Y', 'Z')
+filtered <- t(apply(mfac[,2:ncol(mfac)], 1, function(x) labels[x==1]))
+mfac_kc <- data.frame(mfac$subj, filtered)
+colnames(mfac_kc) <- c('subj', 'test', 'report')
+print(mfac_kc)
+```
+Here, you would supply the labels, rather than recovering them from the data itself (as was done in the previous approach). Here, order is important; the labels need to be in the same order as the corresponding columns for the filter to work.
+
+With `tidyr` and `dplyr`, this approach can look something like this (still agnostic to the label content):
+
+```{r}
+mfac_reformed <- gather(mfac, measure, value, -subj) %>%
+                filter(value != 0) %>%
+                select(subj, measure) %>%
+                separate(measure, c('test', 'type')) %>%
+                spread(test, type) %>%
+                arrange(subj)
+print(mfac_reformed)
+```
+The first few steps are the same; melt everything down and toss the zero values. Then, we need a step to yank apart the measure's letter designation and its type. Fortunately, `tidyr` has a handy `separate` function that does just this; it pulls apart the joined values into two columns that we can label right away. Then, we need to spread our now distinct factor types back into columns--one for the test and one for the report--and sort by subject.
+
+Note also that the intermediate steps in this last example, when we had to separate the two types of factors and get two separate ones back from the `report.X` format, which involved splitting the string and reshaping the data, can also be useful if you have data in this form, or if you have one big code for a condition or trial and at some point want to split it into its components. You can also use the `colsplit()` function from the `reshape2` package for this purpose.
+
+#Parting Thoughts#
+
+And there you have it--a brief introduction to some common data manipulation tasks, and a few ways to handle them. This is only the thinnest of samples of methods. There are lots of different ways to accomplish things, and packages to help you do it. Many of these methods will undoubtedly have my fingerprints all over them; one of the reasons I approached these problems the way I did is to show how learning a skill in one context--reshaping data for plotting, for example--can be useful in other contexts, like changing a data frame's fundamental structure. Many roads lead to the same place, and if you don't like this one, another will get you there just as comfortably, if not more so.
